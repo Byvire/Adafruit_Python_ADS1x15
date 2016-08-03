@@ -280,7 +280,8 @@ class ADS1x15(object):
 
     def start_adc_difference_comparator(self, differential, high_threshold, low_threshold,
                                         gain=1, data_rate=None, active_low=True,
-                                        traditional=True, latching=False, num_readings=1):
+                                        traditional=True, latching=False,
+                                        num_readings=1, wait_function=None):
         """Start continuous ADC conversions between two channels with
         the comparator enabled.  See start_adc_difference for valid differential
         parameter values and their meaning.  When enabled the comparator to will
@@ -308,7 +309,8 @@ class ADS1x15(object):
         return self._read_comparator(differential, gain, data_rate,
                                      ADS1x15_CONFIG_MODE_CONTINUOUS,
                                      high_threshold, low_threshold, active_low,
-                                     traditional, latching, num_readings)
+                                     traditional, latching, num_readings,
+                                     wait_function=wait_function)
 
     def stop_adc(self):
         """Stop all continuous ADC conversions (either normal or difference mode).
