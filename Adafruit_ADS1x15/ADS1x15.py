@@ -20,7 +20,6 @@
 # THE SOFTWARE.
 import time
 
-
 # Register and other configuration values:
 ADS1x15_DEFAULT_ADDRESS        = 0x48
 ADS1x15_POINTER_CONVERSION     = 0x00
@@ -31,7 +30,7 @@ ADS1x15_CONFIG_OS_SINGLE       = 0x8000
 ADS1x15_CONFIG_MUX_OFFSET      = 12
 # Maping of gain values to config register values.
 ADS1x15_CONFIG_GAIN = {
-    2/3: 0x0000,
+    2/3: 0x0000, # 2/3 resolves to 0 here. ... This code is bad.
     1:   0x0200,
     2:   0x0400,
     4:   0x0600,
@@ -64,6 +63,7 @@ ADS1115_CONFIG_DR = {
 ADS1x15_CONFIG_COMP_WINDOW      = 0x0010
 ADS1x15_CONFIG_COMP_ACTIVE_HIGH = 0x0008
 ADS1x15_CONFIG_COMP_LATCHING    = 0x0004
+# To use ALERT/RDY pin, you need a certain setting in COMP_QUE
 ADS1x15_CONFIG_COMP_QUE = {
     1: 0x0000,
     2: 0x0001,
@@ -105,6 +105,9 @@ class ADS1x15(object):
     def _read(self, mux, gain, data_rate, mode):
         """Perform an ADC read with the provided mux, gain, data_rate, and mode
         values.  Returns the signed integer result of the read.
+
+        For continuous mode, this is only used to set the values of the
+        ADC's registers. Thus, "_write" might be a more appropriate name.
         """
         config = ADS1x15_CONFIG_OS_SINGLE  # Go out of power-down mode for conversion.
         # Specify mux value.
@@ -122,7 +125,7 @@ class ADS1x15(object):
         # Set the data rate (this is controlled by the subclass as it differs
         # between ADS1015 and ADS1115).
         config |= self._data_rate_config(data_rate)
-        config |= ADS1x15_CONFIG_COMP_QUE_DISABLE  # Disble comparator mode.
+        config |= ADS1x15_CONFIG_COMP_QUE_DISABLE  # Disable comparator mode.
         # Send the config value to start the ADC conversion.
         # Explicitly break the 16-bit value down to a big endian pair of bytes.
         self._device.writeList(ADS1x15_POINTER_CONFIG, [(config >> 8) & 0xFF, config & 0xFF])
@@ -135,12 +138,19 @@ class ADS1x15(object):
 
     def _read_comparator(self, mux, gain, data_rate, mode, high_threshold,
                          low_threshold, active_low, traditional, latching,
-                         num_readings):
+                         num_readings, wait_function=None):
         """Perform an ADC read with the provided mux, gain, data_rate, and mode
         values and with the comparator enabled as specified.  Returns the signed
         integer result of the read.
+
+        Similar to _read.
         """
         assert num_readings == 1 or num_readings == 2 or num_readings == 4, 'Num readings must be 1, 2, or 4!'
+        if not wait_function:
+            # Wait for the ADC sample to finish based on the sample rate plus a
+            # small offset to be sure (0.1 millisecond).
+            wait_function = lambda : time.sleep(1.0 / data_rate + 0.0001)
+
         # Set high and low threshold register values.
         self._device.writeList(ADS1x15_POINTER_HIGH_THRESHOLD, [(high_threshold >> 8) & 0xFF, high_threshold & 0xFF])
         self._device.writeList(ADS1x15_POINTER_LOW_THRESHOLD, [(low_threshold >> 8) & 0xFF, low_threshold & 0xFF])
@@ -150,7 +160,8 @@ class ADS1x15(object):
         config |= (mux & 0x07) << ADS1x15_CONFIG_MUX_OFFSET
         # Validate the passed in gain and then set it in the config.
         if gain not in ADS1x15_CONFIG_GAIN:
-            raise ValueError('Gain must be one of: 2/3, 1, 2, 4, 8, 16')
+            raise ValueError('Gain must be one of: '
+                             '{0}'.format(' '.join(ADS1x15_CONFIG_GAIN.keys())))
         config |= ADS1x15_CONFIG_GAIN[gain]
         # Set the mode (continuous or single shot).
         config |= mode
@@ -175,9 +186,8 @@ class ADS1x15(object):
         # Send the config value to start the ADC conversion.
         # Explicitly break the 16-bit value down to a big endian pair of bytes.
         self._device.writeList(ADS1x15_POINTER_CONFIG, [(config >> 8) & 0xFF, config & 0xFF])
-        # Wait for the ADC sample to finish based on the sample rate plus a
-        # small offset to be sure (0.1 millisecond).
-        time.sleep(1.0/data_rate+0.0001)
+        # Wait for the ADC sample to finish
+        wait_function()
         # Retrieve the result.
         result = self._device.readList(ADS1x15_POINTER_CONVERSION, 2)
         return self._conversion_value(result[1], result[0])
@@ -233,7 +243,8 @@ class ADS1x15(object):
 
     def start_adc_comparator(self, channel, high_threshold, low_threshold,
                              gain=1, data_rate=None, active_low=True,
-                             traditional=True, latching=False, num_readings=1):
+                             traditional=True, latching=False, num_readings=1,
+                             wait_function=None):
         """Start continuous ADC conversions on the specified channel (0-3) with
         the comparator enabled.  When enabled the comparator to will check if
         the ADC value is within the high_threshold & low_threshold value (both
@@ -250,7 +261,11 @@ class ADS1x15(object):
                       the alert.  Default is false, non-latching.
           - num_readings: The number of readings that match the comparator before
                           triggering the alert.  Can be 1, 2, or 4.  Default is 1.
-        Will return an initial conversion result, then call the get_last_result()
+          - wait_function: How to wait for a reading. By default, time.sleep is
+                           used. This was added so GPIO.wait_for_edge(<comparator>)
+                           could be used. That's only a good idea in non-latching
+                           mode, probably, or else you get a scary race condition.
+        Will return an initial conversion result. Call the get_last_result()
         function continuously to read the most recent conversion result.  Call
         stop_adc() to stop conversions.
         """
@@ -260,7 +275,8 @@ class ADS1x15(object):
         return self._read_comparator(channel + 0x04, gain, data_rate,
                                      ADS1x15_CONFIG_MODE_CONTINUOUS,
                                      high_threshold, low_threshold, active_low,
-                                     traditional, latching, num_readings)
+                                     traditional, latching, num_readings,
+                                     wait_function=wait_function)
 
     def start_adc_difference_comparator(self, differential, high_threshold, low_threshold,
                                         gain=1, data_rate=None, active_low=True,
@@ -305,6 +321,9 @@ class ADS1x15(object):
     def get_last_result(self):
         """Read the last conversion result when in continuous conversion mode.
         Will return a signed integer value.
+
+        This is the proper way to read from the device without writing any
+        values to the device's registers and without calling time.sleep().
         """
         # Retrieve the conversion register value, convert to a signed int, and
         # return it.
